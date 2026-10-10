@@ -51,6 +51,27 @@ DEFAULT_SNAPSHOT_PATH = (
     "material_quality/.runtime/training/"
     "mq_multimodal_v4_20260820_1334/snapshot/dataset.npz"
 )
+
+
+def read_codex_usage(path: str) -> dict:
+    """只读取结构化用量事件，不把素材原文写入进度摘要。"""
+    result = {}
+    try:
+        with open(path, "r", encoding="utf-8") as source:
+            for line in source:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("type") == "turn.completed":
+                    for key, value in (event.get("usage") or {}).items():
+                        if isinstance(value, (int, float)):
+                            result[key] = result.get(key, 0) + value
+    except OSError:
+        return {}
+    return result
+
+
 FORBIDDEN_SOURCE_FIELDS = {
     "asset_id",
     "delivery_day_counts",
@@ -472,6 +493,7 @@ class CodexScriptSupervisor:
         command = [
             self.args.codex_binary,
             "exec",
+            "--json",
             "--ephemeral",
             "--sandbox",
             "read-only",
@@ -547,6 +569,7 @@ class CodexScriptSupervisor:
                 prompt_sha256=_prompt_contract_sha256(),
                 audit_details={
                     "codex_job_id": job["job_id"],
+                    "response_usage": read_codex_usage(job["log_path"]),
                     "job_prompt_sha256": prompt_sha256,
                     "contact_sheet_sha256": build_safe_evidence(
                         _read_json(job["manifests"][content_sha256]),
@@ -606,6 +629,7 @@ class CodexScriptSupervisor:
             self._mark_failure(job, "结果校验或向量化失败：{}".format(exc))
             return
         job["state"]["status"] = "completed"
+        job["state"]["response_usage"] = read_codex_usage(job["log_path"])
         job["state"]["finished_at"] = _now_text()
         job["state"]["saved_count"] = len(records)
         _atomic_write_json(job["state_path"], job["state"])

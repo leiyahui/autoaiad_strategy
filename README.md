@@ -93,3 +93,40 @@ PYTHONPATH=. python -m material_quality.training.train_serving_model \
 
 公开仓库不带 `model.joblib` 和 `smoke_test.npz`，对应正式制品测试会明确跳过；
 将本地制品放回模型版本目录后，该测试会自动执行摘要校验和预测重放。
+
+## 增量样本刷新与并发采集
+
+`sample/refresh_training_data.py` 使用只读事务按主键分段导出投放明细，默认4路连接。
+它保留历史首次投放日期，按素材合并跨计划指标，在本地SQLite构造7日标签；
+固定明细主键上限和已完成批次可避免恢复时重复累加。运行目录须位于Git忽略范围。
+
+```bash
+PYTHONPATH=. .venv/bin/python -m material_quality.sample.refresh_training_data \
+  --config material_quality/.env.local \
+  --output-dir runtime/refresh_run \
+  --as-of 2026-10-10 --workers 4
+```
+
+`--as-of` 是不包含当天的标签截止日，应选取已确认同步完成的日期边界。
+当前刷新逻辑补齐2026年8月12日起的日汇总，同时扫描更早明细核定首次投放日期。
+历史样本表仅作首次日期基线，不能代替近期投放明细。
+
+完整特征抽取环境准备后，启动协调任务：
+
+```bash
+PYTHONPATH=. .venv/bin/python -m material_quality.sample.run_refresh_pipeline \
+  --runtime runtime/refresh_run \
+  --artifact-root material_quality/.runtime \
+  --config material_quality/.env.local \
+  --feature-workers 6 --script-workers 6 --target-count 10000
+```
+
+协调任务等待导出完成后刷新已有标签、复用内容特征，先以最多4路采集200条素材。
+小批成功至少10条且处理异常未超过成功数量后，扩大至指定并发。
+脚本队列使用GPT-5.6 Luna、medium推理和本地Chinese-CLIP文本向量，逐波记录
+结构化token用量。这里只生成样本，不启动模型训练。
+
+授权只从数据库读取并保留在内存，素材接口按应用跨进程限流。
+创建运行目录中的 `STOP` 文件可在当前素材边界停止任务。
+进度分别位于 `status.json`、`collection_status.json` 和 `pipeline_status.json`。
+最终 `snapshot/` 只保留成熟、内容去重且脚本特征完整的训练样本。
