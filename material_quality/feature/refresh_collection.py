@@ -75,6 +75,34 @@ def load_auth() -> Dict[int, dict]:
     return _auth
 
 
+def request_account_video(candidate: dict, material_id: int) -> dict:
+    """共享账户权限失败，避免同账户在并发素材上反复请求。"""
+    identity = json.dumps([str(candidate["user_id"]),str(candidate["advertiser_id"]),
+                           candidate["app_key"]],ensure_ascii=False)
+    key = hashlib.sha256(identity.encode()).hexdigest()
+    fingerprint = hashlib.sha256(candidate["access_token"].encode()).hexdigest()
+    directory = Path(_settings["runtime"])/"account_access"
+    directory.mkdir(parents=True,exist_ok=True)
+    state_path = directory/(key+".json")
+    # 锁覆盖首次探测，确保多个进程不会同时发现同一账户失效。
+    with (directory/(key+".lock")).open("a+") as lock:
+        fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
+        try:
+            state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        except (ValueError,OSError):
+            state = {}
+        if state.get("fingerprint")==fingerprint and state.get("retry_at",0)>time.time():
+            return {"error":"账户无权限","account_cache_hit":True}
+        response = _request_video(candidate["access_token"],str(candidate["advertiser_id"]),
+                                  material_id,candidate["app_key"])
+        if response.get("error")=="账户无权限":
+            atomic_json(state_path,{"fingerprint":fingerprint,"retry_at":time.time()+900})
+            log_warn("账户权限暂不可用，15分钟内跳过重复请求；账户标识：{}".format(key[:12]))
+        elif state:
+            atomic_json(state_path,{})
+        return response
+
+
 def collect_one(target: dict) -> dict:
     """获取一条素材并在当前素材结束时清理临时视频。"""
     global _extractor
@@ -98,11 +126,13 @@ def collect_one(target: dict) -> dict:
             seen.add(key)
             status = _auth_status(candidate)
             if status != "ready":
+                summary["local_auth_skips"] = summary.get("local_auth_skips",0)+1
                 errors.append("授权暂不可用")
                 continue
             for attempt in range(3):
-                response = _request_video(candidate["access_token"],str(candidate["advertiser_id"]),
-                                          int(target["material_id"]),candidate["app_key"])
+                response = request_account_video(candidate,int(target["material_id"]))
+                if response.get("account_cache_hit"):
+                    summary["account_cache_skips"] = summary.get("account_cache_skips",0)+1
                 if response.get("request_id"):
                     summary.setdefault("external_request_ids",[]).append(response["request_id"])
                 error = str(response.get("error") or "")
@@ -211,11 +241,17 @@ def run(args: argparse.Namespace) -> None:
             unique_hashes.add(reference["content_sha256"])
     pending = stratified_targets([target for target in targets if target["material_id"] not in references])
     done = set()
+    counters = Counter()
+    account_cache_skips = 0
+    local_auth_skips = 0
     results_path = root/"collection_results.jsonl"
     if results_path.exists():
         for line in results_path.read_text().splitlines():
             result = json.loads(line)
             done.add(result["material_id"])
+            counters[result["status"]] += 1
+            account_cache_skips += result.get("account_cache_skips",0)
+            local_auth_skips += result.get("local_auth_skips",0)
             if result["status"]=="ready":
                 unique_hashes.add(result["content_sha256"])
     pending = [target for target in pending if target["material_id"] not in done]
@@ -226,8 +262,9 @@ def run(args: argparse.Namespace) -> None:
     for key in ("temp_root","slots"):
         Path(settings[key]).mkdir(parents=True,exist_ok=True)
     log_info("标签已刷新{}条，已有唯一成熟内容{}条，待采集{}条".format(refreshed,len(unique_hashes),len(pending)))
-    counters = Counter()
     phases = [("pilot",pending[:200],min(args.workers,4)),("expanded",pending[200:],args.workers)]
+    if len(done)>=200 and counters["ready"]>=10 and counters["failed"]<=counters["ready"]:
+        phases = [("expanded",pending,args.workers)]
     for phase,phase_targets,workers in phases:
         if len(unique_hashes)>=args.target_count:
             break
@@ -254,6 +291,8 @@ def run(args: argparse.Namespace) -> None:
                         result = {"material_id":target["material_id"],"status":"failed",
                                   "reason":"进程异常："+type(error).__name__}
                     counters[result["status"]] += 1
+                    account_cache_skips += result.get("account_cache_skips",0)
+                    local_auth_skips += result.get("local_auth_skips",0)
                     if result["status"]=="ready":
                         unique_hashes.add(result["content_sha256"])
                     with results_path.open("a") as stream:
@@ -265,6 +304,7 @@ def run(args: argparse.Namespace) -> None:
                             result["material_id"],"，".join(result["external_request_ids"])))
                 atomic_json(root/"collection_status.json",{
                     "phase":phase,"workers":workers,"counts":dict(counters),
+                    "account_cache_skips":account_cache_skips,"local_auth_skips":local_auth_skips,
                     "unique_ready":len(unique_hashes),"target_count":args.target_count,
                     "pending_in_process":len(active),"updated_at":datetime.datetime.now().isoformat()})
         if phase=="pilot" and counters["ready"]<10:
@@ -275,6 +315,7 @@ def run(args: argparse.Namespace) -> None:
         if phase=="pilot" and counters["failed"]>max(counters["ready"],1):
             raise RuntimeError("小批特征处理异常较多，停止扩大采集")
     atomic_json(root/"collection_status.json",{"phase":"finished","counts":dict(counters),
+                "account_cache_skips":account_cache_skips,"local_auth_skips":local_auth_skips,
                 "unique_ready":len(unique_hashes),"target_count":args.target_count})
 
 

@@ -127,6 +127,11 @@ PYTHONPATH=. .venv/bin/python -m material_quality.sample.run_refresh_pipeline \
 结构化token用量。这里只生成样本，不启动模型训练。
 
 授权只从数据库读取并保留在内存，素材接口按应用跨进程限流。
+已知过期授权直接跳过；接口返回账户无权限时，所有采集进程共享15分钟冷却记录。
+授权每4分钟重读，读到新令牌后立即绕过旧冷却记录；素材不存在或主体不一致不屏蔽整个账户。
+`collection_status.json` 中 `account_cache_skips` 统计权限缓存节省的请求，
+`local_auth_skips` 统计本地授权检查跳过次数，均从启用此统计的版本开始累计。
+重启后保留累计采集结果、扩容阶段和旧脚本波次，新波次使用新的目录编号。
 创建运行目录中的 `STOP` 文件可在当前素材边界停止任务。
 进度分别位于 `status.json`、`collection_status.json` 和 `pipeline_status.json`。
 最终 `snapshot/` 只保留成熟、内容去重且脚本特征完整的训练样本。

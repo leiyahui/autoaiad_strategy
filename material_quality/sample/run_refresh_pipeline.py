@@ -49,7 +49,9 @@ def run(args: argparse.Namespace) -> None:
     collection = subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT)
     log.close()
     active = None
-    wave = 0
+    # 恢复后使用新波次目录，避免覆盖已完成队列和用量审计记录。
+    wave = max([int(path.name) for path in (root/"script_waves").glob("*")
+                if path.is_dir() and path.name.isdigit()]+[0])
     failed_hashes = set()
     while True:
         if (root/"STOP").exists():
