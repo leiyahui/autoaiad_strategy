@@ -1,0 +1,6 @@
+# 离线训练、数据库读取和基础测试依赖，兼容 Python 3.8。
+-r material_quality/training/requirements-py38.txt
+SQLAlchemy==2.0.41
+PyMySQL==1.1.2
+requests==2.31.0
+Pillow==10.4.0

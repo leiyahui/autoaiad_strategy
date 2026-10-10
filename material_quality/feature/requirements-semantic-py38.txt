@@ -1,0 +1,14 @@
+# 语义抽取环境与线上API环境隔离，所有版本兼容Python 3.8。
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==1.24.4
+Pillow==10.4.0
+onnxruntime==1.19.2
+opencv-python==4.10.0.84
+rapidocr==2.0.5
+torch==2.1.2+cpu
+torchvision==0.16.2+cpu
+cn_clip==1.6.0
+modelscope==1.20.1
+faster-whisper==1.1.0
+# 与生产环境保持一致，避免Python 3.8干净安装时解析到不可用的新版本。
+tokenizers==0.13.3

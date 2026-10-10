@@ -1,0 +1,52 @@
+{
+  "schema_version": "material_quality_serving_v1",
+  "model_version": "mq-quality-v1-20260824-py38",
+  "created_at": "2026-08-24T09:54:01",
+  "task": "positive_gmv_per_delivery_day_7d",
+  "sample_count": 2524,
+  "positive_count": 833,
+  "zero_count": 1691,
+  "base_feature_dim": 6196,
+  "script_feature_dim": 2048,
+  "raw_feature_version": "multimodal_cnclip_whisper_replayable_v4",
+  "script_feature_version": "codex_agent_script_cnclip_v1",
+  "script_models": [
+    "gpt-5.6-luna"
+  ],
+  "script_embedding_models": [
+    "cn-clip-rn50-text-aggregate"
+  ],
+  "fusion_weights": {
+    "visual": 0.5,
+    "script": 0.5
+  },
+  "regularization_profile": {
+    "name": "严格",
+    "pca_components": 8,
+    "c": 0.001
+  },
+  "base_dataset_sha256": "a9c2d6bb24d22c82bfd4c508421f3168f52e70548bf995b075002b43c5d22375",
+  "script_dataset_sha256": "390ea2208d85a203068475cf80613134ea6e7cdcb03fa421dfd1401093c47994",
+  "model_sha256": "5f4fc9b3b04e013438b2607a1305dc4fb62358a0ec61599f572ad58f1667a487",
+  "runtime": {
+    "python": "3.9.23",
+    "numpy": "1.24.4",
+    "scikit_learn": "1.3.2",
+    "joblib": "1.3.2"
+  },
+  "training_diagnostic": {
+    "positive_rate": 0.33003169572107766,
+    "pr_auc": 0.47121537070420705,
+    "roc_auc": 0.6517918817438271,
+    "brier": 0.2227199940964034
+  },
+  "training_score_quantiles": {
+    "p10": 0.3764813771241538,
+    "p25": 0.3979323143512906,
+    "p50": 0.43210441190206766,
+    "p75": 0.45873588201480436,
+    "p90": 0.513112023653606
+  },
+  "usage_policy": "只用于素材初筛和排序，不直接触发自动投放",
+  "smoke_test_maximum_error": 0.0
+}
