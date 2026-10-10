@@ -14,7 +14,7 @@ from typing import Dict, List
 
 from sqlalchemy import create_engine, text
 
-from plan_logger import log_info, set_process_name
+from plan_logger import log_error, log_info, set_process_name
 
 
 def load_database_url(config_path: str) -> str:
@@ -66,7 +66,7 @@ def initialize_local(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def build_candidates(connection: sqlite3.Connection, as_of: str) -> List[dict]:
+def build_candidates(connection: sqlite3.Connection, as_of: str, recent_from: str = "2026-08-12") -> List[dict]:
     """保留历史首次日期，避免近期再次投放的老素材被误标为新素材。"""
     rows = connection.execute("""
         WITH first_dates AS (
@@ -85,9 +85,9 @@ def build_candidates(connection: sqlite3.Connection, as_of: str) -> List[dict]:
         FROM daily d INNER JOIN first_dates f ON f.material_id=d.material_id
         LEFT JOIN baseline b ON b.material_id=d.material_id
         WHERE d.stat_date>=f.first_day AND d.stat_date<date(f.first_day, '+7 days')
-            AND f.first_day>='2026-08-12'
+            AND f.first_day>=?
         GROUP BY d.material_id, f.first_day
-    """).fetchall()
+    """, (recent_from,)).fetchall()
     industries = {row["id"]: row["industry"] for row in connection.execute("SELECT * FROM plans")}
     result = []
     for row in rows:
@@ -143,13 +143,13 @@ def run(args: argparse.Namespace) -> None:
     manifest_path = root / "source_manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
-        if manifest["as_of"] != args.as_of:
-            raise ValueError("断点目录的标签截止日期不一致")
+        if manifest["as_of"] != args.as_of or manifest["recent_from"] != args.from_date:
+            raise ValueError("断点目录的标签日期范围不一致")
     else:
         maximum = query("SELECT MAX(id) AS value FROM materialhourstats")[0]["value"]
         manifest = {"as_of": args.as_of, "maximum_source_id": maximum,
                     "created_at": datetime.datetime.now().isoformat(), "workers": args.workers,
-                    "recent_from": "2026-08-12", "complete": False}
+                    "recent_from": args.from_date, "complete": False}
         atomic_json(manifest_path, manifest)
     baseline = query("""
         SELECT s.material_id, s.first_stat_date, s.asset_id, s.label_status,
@@ -177,6 +177,9 @@ def run(args: argparse.Namespace) -> None:
         low = int(bound["lower_id"])
         tasks.append((low, cursor, int(bound["source_rows"])))
         cursor = low
+        if len(tasks)%100==0:
+            atomic_json(root/"status.json",{"phase":"partitioning","prepared_batches":len(tasks),
+                        "current_lower_id":cursor,"updated_at":datetime.datetime.now().isoformat()})
     completed = {r[0] for r in connection.execute("SELECT lower_id FROM batches")}
     pending = [task for task in tasks if task[0] not in completed]
     log_info("冻结明细范围已切成{}批，待导出{}批，并发{}".format(len(tasks), len(pending), args.workers))
@@ -187,7 +190,7 @@ def run(args: argparse.Namespace) -> None:
             try:
                 rows = query("""
                     SELECT account_plan_id AS plan_id, material_id,
-                        IF(date>='2026-08-12',date,'历史') AS stat_date, MIN(date) AS first_day,
+                        IF(date>=:recent_from,date,'历史') AS stat_date, MIN(date) AS first_day,
                         SUM(COALESCE(gmv,0)) AS gmv,SUM(COALESCE(cost,0)) AS cost,
                         SUM(COALESCE(orders,0)) AS orders,SUM(COALESCE(send,0)) AS send,
                         SUM(COALESCE(click,0)) AS click
@@ -196,8 +199,8 @@ def run(args: argparse.Namespace) -> None:
                         AND material_type='VIDEO' AND material_id<>''
                         AND (COALESCE(gmv,0)<>0 OR COALESCE(cost,0)<>0
                             OR COALESCE(orders,0)<>0 OR COALESCE(send,0)<>0 OR COALESCE(click,0)<>0)
-                    GROUP BY account_plan_id,material_id,IF(date>='2026-08-12',date,'历史')
-                """, {"low": low, "high": high, "as_of": args.as_of})
+                    GROUP BY account_plan_id,material_id,IF(date>=:recent_from,date,'历史')
+                """, {"low": low, "high": high, "as_of": args.as_of,"recent_from":args.from_date})
                 return task, rows
             except Exception:
                 if attempt == 2:
@@ -224,7 +227,7 @@ def run(args: argparse.Namespace) -> None:
                             "total_batches": len(tasks), "updated_at": datetime.datetime.now().isoformat()}
                 atomic_json(root / "status.json", progress)
                 log_info("明细导出进度：{}/{}批".format(progress["completed_batches"],len(tasks)))
-    candidates = build_candidates(connection, args.as_of)
+    candidates = build_candidates(connection, args.as_of,args.from_date)
     output = root / "candidates.jsonl"
     with output.open("w") as stream:
         for target in candidates:
@@ -246,12 +249,21 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--as-of", required=True)
+    parser.add_argument("--from-date", default="2026-08-12")
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     datetime.datetime.strptime(args.as_of, "%Y-%m-%d")
+    datetime.datetime.strptime(args.from_date, "%Y-%m-%d")
     if args.workers < 1 or args.workers > 8:
         raise ValueError("数据库读取并发必须在1至8之间")
-    run(args)
+    try:
+        run(args)
+    except Exception as error:
+        root = Path(args.output_dir)
+        root.mkdir(parents=True,exist_ok=True)
+        atomic_json(root/"status.json",{"phase":"failed","reason":"导出异常："+type(error).__name__})
+        log_error("训练数据导出失败，异常类型：{}；已完成分段可恢复".format(type(error).__name__))
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

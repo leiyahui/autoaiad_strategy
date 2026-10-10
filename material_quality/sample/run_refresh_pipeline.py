@@ -39,6 +39,8 @@ def run(args: argparse.Namespace) -> None:
     artifacts = Path(args.artifact_root)
     raw_root = artifacts/"raw_features"
     script_root = artifacts/"script_features_luna_consistent"
+    log_info("刷新流水线启动，目标{}条，特征并发{}，脚本并发{}，模型GPT-5.6 Luna，推理medium".format(
+        args.target_count,args.feature_workers,args.script_workers))
     version = "codex_agent_script_cnclip_v1"
     command = [sys.executable,"-u","-m","material_quality.feature.refresh_collection",
                "--runtime",str(root),"--artifact-root",str(artifacts),"--config",args.config,
@@ -51,6 +53,7 @@ def run(args: argparse.Namespace) -> None:
     failed_hashes = set()
     while True:
         if (root/"STOP").exists():
+            log_warn("收到停止请求，等待当前素材任务结束并关闭脚本队列")
             if active and active.poll() is None:
                 active.terminate()
             atomic_json(root/"pipeline_status.json",{"phase":"stopping","collection_pid":collection.pid})
@@ -75,6 +78,7 @@ def run(args: argparse.Namespace) -> None:
                 if not failed_hashes:
                     raise RuntimeError("脚本队列异常退出，请查看对应批次日志")
             active = None
+            missing = [value for value in missing if value not in failed_hashes]
         if not active and missing:
             wave += 1
             wave_root = root/"script_waves"/str(wave)
@@ -92,7 +96,9 @@ def run(args: argparse.Namespace) -> None:
         usage = Counter()
         for path in (root/"script_waves").glob("*/jobs/*/codex.log"):
             usage.update(read_codex_usage(str(path)))
-        status = {"phase":"collecting","collection_pid":collection.pid,
+        exported = (root/"source_manifest.json").exists() and json.loads(
+            (root/"source_manifest.json").read_text()).get("complete")
+        status = {"phase":"collecting" if exported else "waiting_export","collection_pid":collection.pid,
                   "collection_exit":collection.poll(),"script_wave":wave,
                   "script_pid":active.pid if active else None,"ready_content":len(hashes),
                   "pending_scripts":len(missing),"failed_scripts":len(failed_hashes),
@@ -138,6 +144,9 @@ def run(args: argparse.Namespace) -> None:
                      "script_feature_version":version,"source_refresh":str(root),
                      "ready_without_script":len(hashes)-len(indices)})
     manifest["dataset_sha256"] = _dataset_digest(dataset)
+    manifest["min_first_stat_date"] = datetime.date.fromordinal(int(dataset["date_ordinals"].min())).isoformat()
+    manifest["max_first_stat_date"] = datetime.date.fromordinal(int(dataset["date_ordinals"].max())).isoformat()
+    manifest["primary_industry_counts"] = dict(Counter(dataset["primary_industries"].tolist()))
     save_semantic_snapshot(str(root/"snapshot"),dataset,manifest)
     atomic_json(root/"pipeline_status.json",{**status,"phase":"samples_complete",
                 "sample_count":len(indices),"snapshot":str(root/"snapshot")})

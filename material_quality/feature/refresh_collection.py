@@ -37,7 +37,7 @@ def initialize_worker(settings: dict) -> None:
     _settings = settings
     set_process_name("material_quality_collection")
     os.environ["MATERIAL_QUALITY_RATE_LIMIT_FILE"] = settings["rate_limit_file"]
-    os.environ["MATERIAL_QUALITY_URL_INTERVAL_SECONDS"] = "0.5"
+    os.environ["MATERIAL_QUALITY_URL_INTERVAL_SECONDS"] = "1.0"
     for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         os.environ[name] = "1"
     _engine = create_engine(load_database_url(settings["config"]), pool_size=1,
@@ -100,8 +100,17 @@ def collect_one(target: dict) -> dict:
             if status != "ready":
                 errors.append("授权暂不可用")
                 continue
-            response = _request_video(candidate["access_token"],str(candidate["advertiser_id"]),
-                                      int(target["material_id"]),candidate["app_key"])
+            for attempt in range(3):
+                response = _request_video(candidate["access_token"],str(candidate["advertiser_id"]),
+                                          int(target["material_id"]),candidate["app_key"])
+                if response.get("request_id"):
+                    summary.setdefault("external_request_ids",[]).append(response["request_id"])
+                error = str(response.get("error") or "")
+                if "限流" not in error and "接口临时异常" not in error:
+                    break
+                summary["api_retry_count"] = summary.get("api_retry_count",0)+1
+                if attempt<2:
+                    time.sleep(2**(attempt+1))
             possible = response.get("detail")
             if possible and _valid_video_url(possible.get("url")):
                 detail = possible
@@ -174,17 +183,21 @@ def run(args: argparse.Namespace) -> None:
     source = root / "source_manifest.json"
     while not source.exists() or not json.loads(source.read_text()).get("complete"):
         if (root/"STOP").exists():
+            log_warn("收到停止请求，结束等待样本导出")
             return
+        progress = root/"status.json"
+        if progress.exists() and json.loads(progress.read_text()).get("phase")=="failed":
+            raise RuntimeError("上游数据导出失败，采集队列已停止等待")
         time.sleep(10)
-    targets = [json.loads(line) for line in (root/"candidates.jsonl").read_text().splitlines()]
-    targets = [target for target in targets if target["label_status"]=="ready"]
+    all_targets = [json.loads(line) for line in (root/"candidates.jsonl").read_text().splitlines()]
+    targets = [target for target in all_targets if target["label_status"]=="ready"]
     raw_root = Path(args.artifact_root)/"raw_features"
     store = LocalRawFeatureStore(str(raw_root),VERSION)
     references = {}
     for path in (raw_root/VERSION/"assets").glob("*.json"):
         value = json.loads(path.read_text())
         references[value["material_id"]] = value
-    by_material = {target["material_id"]:target for target in targets}
+    by_material = {target["material_id"]:target for target in all_targets}
     unique_hashes = set()
     refreshed = 0
     for mid,reference in references.items():
@@ -192,8 +205,9 @@ def run(args: argparse.Namespace) -> None:
             target = by_material[mid]
             target["asset_id"] = reference["asset_id"]
             store.save_asset_reference(target,reference["content_sha256"])
+            reference = {**reference,**target}
             refreshed += 1
-        if reference["label_status"]=="ready" or mid in by_material:
+        if reference["label_status"]=="ready":
             unique_hashes.add(reference["content_sha256"])
     pending = stratified_targets([target for target in targets if target["material_id"] not in references])
     done = set()
@@ -223,7 +237,7 @@ def run(args: argparse.Namespace) -> None:
             exhausted = False
             while active or not exhausted:
                 stopped = (root/"STOP").exists() or counters["disk_low"]>0
-                while not exhausted and not stopped and len(active)<workers*2 and len(unique_hashes)<args.target_count:
+                while not exhausted and not stopped and len(active)<workers and len(unique_hashes)<args.target_count:
                     target = next(iterator,None)
                     if target is None:
                         exhausted = True
@@ -246,6 +260,9 @@ def run(args: argparse.Namespace) -> None:
                         stream.write(json.dumps(result,ensure_ascii=False)+"\n")
                     log_info("素材任务结束：{}，状态{}，原因{}".format(
                         result["material_id"],result["status"],result.get("reason","")))
+                    if result.get("external_request_ids"):
+                        log_info("素材{}外部请求标识：{}".format(
+                            result["material_id"],"，".join(result["external_request_ids"])))
                 atomic_json(root/"collection_status.json",{
                     "phase":phase,"workers":workers,"counts":dict(counters),
                     "unique_ready":len(unique_hashes),"target_count":args.target_count,

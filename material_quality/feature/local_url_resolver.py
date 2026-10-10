@@ -168,16 +168,17 @@ def _request_video(
     except (requests.RequestException, ValueError) as exc:
         return {"error": "接口临时异常{}".format(type(exc).__name__)}
     error_code = str(payload.get("code") or "")
+    request_id = str(payload.get("request_id") or payload.get("log_id") or "")
     if error_code not in ("", "0"):
         if error_code in ("40100", "40110", "40130"):
-            return {"error": "接口临时限流"}
+            return {"error": "接口临时限流", "request_id": request_id}
         if error_code in ("40002", "40003"):
-            return {"error": "账户无权限"}
-        return {"error": "接口临时异常{}".format(error_code)}
+            return {"error": "账户无权限", "request_id": request_id}
+        return {"error": "接口临时异常{}".format(error_code), "request_id": request_id}
     video_list = (payload.get("data") or {}).get("list") or []
     if not video_list:
-        return {"error": "未返回素材"}
-    return {"detail": dict(video_list[0])}
+        return {"error": "未返回素材", "request_id": request_id}
+    return {"detail": dict(video_list[0]), "request_id": request_id}
 
 
 def _valid_video_url(value: object) -> bool:
