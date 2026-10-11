@@ -155,3 +155,35 @@ python -m material_quality.training.evaluate_refresh_model \
 每个窗口仅用标签在预测开始前闭合的样本训练，隔离7日标签窗口，不利用测试结果调参。
 完成评估后可执行前述 `train_serving_model` 生成独立候选版本；全量拟合训练AUC不代替时间外指标。
 模型发布前仍须在目标Python 3.8推理环境验证依赖和预测一致性。
+
+## 曝光置信度与容量改进实验
+
+`train_confidence_classifier` 在同一冻结样本上比较均匀权重、曝光置信度权重和额外行业均衡。
+曝光权重为 `sqrt(clip(send_7d / 500, 0.01, 1))`，正负样本使用同一规则，归一化为均值1；
+它仅作用于分类损失，降维仍在训练样本上进行无权拟合。曝光不作为预测输入，权重是启发式置信度，
+不能等同于消除了投放策略的因果影响。所有候选保持画面与脚本各50%。
+
+```bash
+python -m material_quality.training.train_confidence_classifier \
+  --snapshot-dir runtime/refresh_run/snapshot \
+  --script-feature-root material_quality/.runtime/script_features_luna_consistent \
+  --exposure-path runtime/refresh_run/diagnostics/verified_exposure.json \
+  --candidates-path runtime/refresh_run/candidates.jsonl \
+  --plan-account-path runtime/refresh_run/diagnostics/plan_account_groups.json \
+  --output-dir runtime/refresh_run/confidence_experiment \
+  --model-version mq-quality-confidence-candidate --test-from 2026-09-15
+```
+
+曝光文件包含 `dataset_sha256` 和按素材ID索引的 `records`，各记录至少包含 `send_7d`。
+准备此文件时必须将投放起始日、投放天数和日均GMV逐条与冻结快照核对；缺失曝光不能自动填零。
+计划到账户映射使用计划ID作为键、匿名账户标识作为值，禁止包含授权令牌。
+
+候选配置、权重公式和选择规则在运行前写入 `protocol.json`，按三个滚动窗口的非加权AUC均值
+减去0.25倍标准差选模。训练标签及选模验证标签都必须在对应预测时点之前闭合。
+`selection.json` 在评估历史测试段之前保存，测试报告同时保留原配置和各权重组的验证优胜者。
+账户内指标仅使用账户唯一且正负各至少两条的账户，差值区间按账户重抽样。
+既有测试段曾用于诊断，因此本实验不能充当新模型的独立上线验收。
+
+最终验证优胜模型保存到 `candidate_model/`，状态为等待新时间段验收；不会部署或恢复素材采集。
+正式制品训练器也支持显式 `--pca-components`、`--regularization-c` 和按内容哈希对齐的
+`--sample-weight-path`，默认参数保持原有行为。

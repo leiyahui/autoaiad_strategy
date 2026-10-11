@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import platform
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -45,10 +45,18 @@ def _file_sha256(path: str) -> str:
 def _fit_serving_towers(
     dataset: Dict[str, np.ndarray],
     labels: np.ndarray,
+    profile: Optional[dict] = None,
+    sample_weight: Optional[np.ndarray] = None,
 ) -> Tuple[dict, dict]:
     """在同一批全量样本上拟合画面和脚本两个强正则子模型。"""
     models = {}
     probabilities = {}
+    profile = STRICT_PROFILE if profile is None else profile
+    if sample_weight is not None:
+        sample_weight = np.asarray(sample_weight,dtype=np.float64)
+        if sample_weight.shape!=labels.shape or not np.isfinite(sample_weight).all() or np.any(sample_weight<=0):
+            raise ValueError("样本权重必须与标签一一对应且为正有限数")
+    fit_options = {} if sample_weight is None else {"模型__sample_weight":sample_weight}
     for tower_name, groups in SERVING_TOWERS.items():
         matrix, semantic_blocks, statistic_indices = _build_matrix_and_layout(
             dataset,
@@ -57,10 +65,10 @@ def _fit_serving_towers(
         classifier = _build_classifier(
             semantic_blocks,
             statistic_indices,
-            int(STRICT_PROFILE["pca_components"]),
-            float(STRICT_PROFILE["c"]),
+            int(profile["pca_components"]),
+            float(profile["c"]),
         )
-        classifier.fit(matrix, labels)
+        classifier.fit(matrix, labels, **fit_options)
         models[tower_name] = classifier
         probabilities[tower_name] = classifier.predict_proba(matrix)[:, 1]
     return models, probabilities
@@ -122,7 +130,18 @@ def run_training(args: argparse.Namespace) -> dict:
     binary_labels = (dataset["labels"] > 0).astype(np.int32)
     if np.unique(binary_labels).size != 2:
         raise RuntimeError("正式训练样本必须同时包含正GMV和零GMV素材")
-    models, probabilities = _fit_serving_towers(dataset, binary_labels)
+    profile = {"name":"显式训练配置","pca_components":int(getattr(args,"pca_components",8)),
+               "c":float(getattr(args,"regularization_c",0.001))}
+    if profile["pca_components"]<1 or not np.isfinite(profile["c"]) or profile["c"]<=0:
+        raise ValueError("降维维数和正则参数必须为正数")
+    weights = None
+    weight_path = getattr(args,"sample_weight_path",None)
+    if weight_path:
+        with np.load(weight_path,allow_pickle=False) as source:
+            if not np.array_equal(source["content_sha256"],dataset["content_sha256"]):
+                raise ValueError("训练权重的内容哈希或顺序与快照不一致")
+            weights = source["sample_weight"]
+    models, probabilities = _fit_serving_towers(dataset, binary_labels,profile,weights)
     fused = (
         probabilities["visual"] * DEFAULT_FUSION_WEIGHTS["visual"]
         + probabilities["script"] * DEFAULT_FUSION_WEIGHTS["script"]
@@ -164,7 +183,11 @@ def run_training(args: argparse.Namespace) -> dict:
         "script_models": source_manifest["script_models"],
         "script_embedding_models": source_manifest["script_embedding_models"],
         "fusion_weights": dict(DEFAULT_FUSION_WEIGHTS),
-        "regularization_profile": dict(STRICT_PROFILE),
+        "regularization_profile": profile,
+        "sample_weight": {"description":getattr(args,"sample_weight_description","均匀权重"),
+                          "sha256":_file_sha256(weight_path) if weight_path else None,
+                          "minimum":float(weights.min()) if weights is not None else 1.0,
+                          "maximum":float(weights.max()) if weights is not None else 1.0},
         "base_dataset_sha256": source_manifest["base_dataset_sha256"],
         "script_dataset_sha256": source_manifest["script_dataset_sha256"],
         "model_sha256": _file_sha256(model_path),
@@ -217,6 +240,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--model-version", required=True)
+    parser.add_argument("--pca-components",type=int,default=8)
+    parser.add_argument("--regularization-c",type=float,default=0.001)
+    parser.add_argument("--sample-weight-path")
+    parser.add_argument("--sample-weight-description",default="均匀权重")
     return parser.parse_args()
 
 
