@@ -135,3 +135,23 @@ PYTHONPATH=. .venv/bin/python -m material_quality.sample.run_refresh_pipeline \
 创建运行目录中的 `STOP` 文件可在当前素材边界停止任务。
 进度分别位于 `status.json`、`collection_status.json` 和 `pipeline_status.json`。
 最终 `snapshot/` 只保留成熟、内容去重且脚本特征完整的训练样本。
+
+## 暂停采集后训练
+
+保留运行目录的 `STOP` 文件，等待协调进程释放 `pipeline.lock`，再补齐已有内容的脚本特征。
+`freeze_local_snapshot` 要求所有入选样本脚本完整，并拒绝覆盖已有快照：
+
+```bash
+python -m material_quality.training.freeze_local_snapshot \
+  --artifact-root material_quality/.runtime --output-dir runtime/refresh_run/snapshot
+python -m material_quality.training.evaluate_refresh_model \
+  --snapshot-dir runtime/refresh_run/snapshot \
+  --script-feature-root material_quality/.runtime/script_features_luna_consistent \
+  --previous-model-dir /path/to/previous_model \
+  --output-dir runtime/refresh_run/evaluation --test-from 2026-09-15
+```
+
+评估固定沿用画面50%加脚本50%，使用三个过去预测未来的滚动窗口和独立时间测试集。
+每个窗口仅用标签在预测开始前闭合的样本训练，隔离7日标签窗口，不利用测试结果调参。
+完成评估后可执行前述 `train_serving_model` 生成独立候选版本；全量拟合训练AUC不代替时间外指标。
+模型发布前仍须在目标Python 3.8推理环境验证依赖和预测一致性。

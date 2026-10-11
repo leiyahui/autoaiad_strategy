@@ -259,7 +259,7 @@ def build_safe_evidence(manifest: dict, contact_sheet_path: str) -> dict:
     return evidence
 
 
-def build_output_schema() -> dict:
+def build_output_schema(expected_hashes: Sequence[str] = ()) -> dict:
     """构造一个批次的严格结构化输出约束。"""
     return {
         "type": "object",
@@ -271,7 +271,8 @@ def build_output_schema() -> dict:
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "content_sha256": {"type": "string"},
+                        "content_sha256": ({"type":"string","enum":list(expected_hashes)}
+                                           if expected_hashes else {"type":"string"}),
                         "analysis": SCRIPT_ANALYSIS_SCHEMA,
                     },
                     "required": ["content_sha256", "analysis"],
@@ -461,6 +462,9 @@ class CodexScriptSupervisor:
         output_path = os.path.join(job_directory, "output.json")
         log_path = os.path.join(job_directory, "codex.log")
         state_path = os.path.join(job_directory, "state.json")
+        schema_path = os.path.join(job_directory, "output_schema.json")
+        # 用输入哈希枚举约束身份字段，防止模型抄写长哈希时丢失字符。
+        _atomic_write_json(schema_path,build_output_schema(batch_hashes))
         _atomic_write_text(prompt_path, prompt)
         state = {
             "job_id": job_id,
@@ -484,6 +488,7 @@ class CodexScriptSupervisor:
             "output_path": output_path,
             "log_path": log_path,
             "state_path": state_path,
+            "schema_path": schema_path,
             "state": state,
         }
 
@@ -510,7 +515,7 @@ class CodexScriptSupervisor:
         # 图片参数可接收多个值，后置已命名参数用于明确结束图片列表。
         command.extend([
             "--output-schema",
-            self.schema_path,
+            job["schema_path"],
             "--output-last-message",
             job["output_path"],
         ])
